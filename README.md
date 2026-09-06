@@ -137,6 +137,33 @@ npm run dev      # http://localhost:3000
 | `npm run typecheck` | `next typegen` then `tsc --noEmit` |
 | `npm test` | Vitest — the domain suite |
 
+## Deploying
+
+There is no server-side configuration to get wrong: no environment variables, no
+database, no API keys. State lives in the browser's `localStorage` and the spreadsheet
+parsing runs client-side, so a deploy is only ever the build output.
+
+On Vercel, import the repository at [vercel.com/new](https://vercel.com/new) and accept
+the detected defaults — the framework preset, build command and output directory are all
+correct as they stand, and no `vercel.json` is needed. Pushes to `main` publish from then
+on. Any host that can run a Next.js build works the same way; nothing here is
+Vercel-specific.
+
+Two things worth settling before a public URL points at it:
+
+- The default domain is derived from the repository name, so rename the repository
+  *before* the first deploy if you want a different one.
+- There is no authentication. Nothing sensitive ships — the bundled projections are
+  sample data, and a recorded draft never leaves the browser it was recorded in — but the
+  page itself is readable by anyone with the link.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs lint, typecheck, the domain suite and a production build
+on every push to `main` and every pull request — the same four scripts you would run
+locally, in the same order. A green run means the branch builds, so a deploy from it will
+not fail at the build step.
+
 ## Testing
 
 `lib/domain/domain.test.ts` covers the parts where being wrong is expensive and invisible:
