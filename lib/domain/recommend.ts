@@ -30,13 +30,27 @@ export type ReturnRisk = {
   level: ReturnRiskLevel;
   label: string;
   /**
-   * Survival probability, present only when the player has a real ADP to
-   * reason from. With rank alone the level is qualitative and this is
-   * omitted rather than invented.
+   * Survival probability as an unrounded percentage, present only when the
+   * player has a real ADP to reason from. With rank alone the level is
+   * qualitative and this is omitted rather than invented.
+   *
+   * Left unrounded so the display layer can still tell 0.002% from 0.4%;
+   * rounding here flattened both to a bare "0%".
    */
   probability?: number;
   basis: "adp" | "rank" | "none";
 };
+
+/**
+ * A logistic estimate never actually reaches 0 or 100, and printing either
+ * claims a certainty the model cannot support — so the extremes are stated as
+ * bounds instead.
+ */
+export function formatReturnChance(percent: number): string {
+  if (percent < 1) return "<1%";
+  if (percent > 99) return ">99%";
+  return `${Math.round(percent)}%`;
+}
 
 export type CategoryImpact = {
   key: CategoryKey;
@@ -226,7 +240,7 @@ export function estimateReturnRisk(
     level,
     label,
     // Only an actual draft-position sample supports a number.
-    probability: basis === "adp" ? Math.round(probability * 100) : undefined,
+    probability: basis === "adp" ? probability * 100 : undefined,
     basis,
   };
 }

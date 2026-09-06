@@ -2,7 +2,7 @@ import { IconPointFilled } from "@tabler/icons-react";
 import { CategoryMetric } from "./CategoryMetric";
 import { StatusPill } from "./StatusPill";
 import { CATEGORY_BY_KEY } from "@/lib/domain/categories";
-import type { Recommendation } from "@/lib/domain/recommend";
+import { formatReturnChance, type Recommendation } from "@/lib/domain/recommend";
 
 /**
  * The one headline recommendation: who, why (three reasons at most), how
@@ -56,7 +56,7 @@ export function RecommendationCard({
           <span className="font-bold text-fh-ink">
             {/* A percentage only where there is an ADP to derive it from. */}
             {returnRisk.probability !== undefined
-              ? `${returnRisk.probability}% chance`
+              ? `${formatReturnChance(returnRisk.probability)} chance`
               : returnRisk.label}
           </span>
           {picksUntilTurn !== undefined && (

@@ -7,6 +7,7 @@ import { buildPlayerPool, matchKeyFor } from "./projections";
 import { autoDetectMapping, buildProjectionRows, parseDelimited, parseNumber } from "./workbook";
 import { createInitialState, reducer, draftedPlayerIds, type AppState } from "./state";
 import { deserialize } from "./persistence";
+import { formatReturnChance } from "./recommend";
 import { derive } from "./selectors";
 import type {
   LeagueScoringSettings,
@@ -594,5 +595,18 @@ describe("recommendations", () => {
     const risk = derived.analytics!.recommendation.primary!.returnRisk;
     expect(risk.basis).toBe("adp");
     expect(typeof risk.probability).toBe("number");
+  });
+
+  it("states the extremes as bounds, never as 0% or 100%", () => {
+    // A logistic estimate is never actually impossible or certain, so the
+    // display must not claim it is.
+    expect(formatReturnChance(0.0019)).toBe("<1%");
+    expect(formatReturnChance(99.97)).toBe(">99%");
+    expect(formatReturnChance(0)).toBe("<1%");
+    expect(formatReturnChance(100)).toBe(">99%");
+    // Everything in between still rounds to a plain percentage.
+    expect(formatReturnChance(1)).toBe("1%");
+    expect(formatReturnChance(46.4)).toBe("46%");
+    expect(formatReturnChance(99)).toBe("99%");
   });
 });
