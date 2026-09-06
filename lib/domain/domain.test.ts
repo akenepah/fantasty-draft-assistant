@@ -7,9 +7,10 @@ import { buildPlayerPool, matchKeyFor } from "./projections";
 import { autoDetectMapping, buildProjectionRows, parseDelimited, parseNumber } from "./workbook";
 import { createInitialState, reducer, draftedPlayerIds, type AppState } from "./state";
 import { deserialize } from "./persistence";
-import { formatReturnChance } from "./recommend";
+import { categoryGaps, formatReturnChance, postDraftWatchlist } from "./recommend";
 import { derive } from "./selectors";
 import type {
+  CategoryKey,
   LeagueScoringSettings,
   Player,
   Position,
@@ -595,6 +596,75 @@ describe("recommendations", () => {
     const risk = derived.analytics!.recommendation.primary!.returnRisk;
     expect(risk.basis).toBe("adp");
     expect(typeof risk.probability).toBe("number");
+  });
+
+  it("reports no gaps when the team is not behind the field anywhere", () => {
+    // The regression: every rank tied means sorting cannot order them, so the
+    // worst-three slice returned whichever categories came first in the list
+    // and the UI then blamed those categories for nothing.
+    const keys: CategoryKey[] = ["G", "A", "PPP", "HIT", "BLK", "PIM"];
+    const tiedThird = Object.fromEntries(keys.map((key) => [key, 3]));
+    expect(categoryGaps(tiedThird, keys, 12)).toEqual([]);
+
+    const leading = Object.fromEntries(keys.map((key) => [key, 1]));
+    expect(categoryGaps(leading, keys, 12)).toEqual([]);
+  });
+
+  it("reports the categories that really are behind, worst first", () => {
+    const keys: CategoryKey[] = ["G", "A", "PPP", "HIT", "BLK", "PIM"];
+    const ranks = { G: 2, A: 4, PPP: 12, HIT: 9, BLK: 11, PIM: 1 };
+    expect(categoryGaps(ranks, keys, 12).map((gap) => gap.key)).toEqual(["PPP", "BLK", "HIT"]);
+  });
+
+  it("treats a category nobody on the roster contributes to as last", () => {
+    // A team with no goalies genuinely is losing the goalie categories.
+    const keys: CategoryKey[] = ["G", "W", "SV"];
+    expect(categoryGaps({ G: 1 }, keys, 12).map((gap) => gap.key).sort()).toEqual(["SV", "W"]);
+  });
+
+  it("only cites a category the watchlist player actually helps", () => {
+    let state = createInitialState();
+    for (let overall = 1; overall <= 40; overall++) {
+      const derived = derive(state);
+      const next = derived.draft.available[0];
+      if (!next) break;
+      state = reducer(state, {
+        type: "draft/record",
+        overall,
+        franchiseId: derived.draft.pointer.franchiseId!,
+        selection: { kind: "player", playerId: next.id },
+      });
+    }
+
+    const derived = derive(state);
+    // Guard against the draft silently not happening: without real picks the
+    // managed roster is empty and this asserts nothing.
+    expect(derived.draft.managedRoster.length).toBeGreaterThan(0);
+    const managedId = state.league.managedFranchiseId;
+    const managedRow = derived.analytics!.standings.rows.find(
+      (row) => row.franchiseId === managedId,
+    );
+    // Exactly one gap, and one every skater has a number for. The old code
+    // took the first impact whose key was a gap regardless of sign, so a
+    // single gap put "Blocks help" on every row — including forwards who
+    // block less than the man they would replace.
+    const onlyBlocksBehind = { ...managedRow!.categoryRanks, BLK: 12 };
+    for (const key of ["G", "A", "PPP", "HIT", "PIM", "W", "SV", "SVPCT", "GAA"] as CategoryKey[]) {
+      onlyBlocksBehind[key] = 1;
+    }
+
+    const watchlist = postDraftWatchlist(
+      derived.draft.available,
+      derived.draft.managedRoster,
+      state.league.roster,
+      state.league.scoring,
+      onlyBlocksBehind,
+      state.league.franchises.length,
+    );
+
+    expect(watchlist.length).toBeGreaterThan(1);
+    const blocksRows = watchlist.filter((entry) => entry.reason === "Blocks help");
+    expect(blocksRows.length).toBeLessThan(watchlist.length);
   });
 
   it("states the extremes as bounds, never as 0% or 100%", () => {

@@ -435,10 +435,16 @@ export default function DraftRoomPage() {
 
           <div className="border-t border-fh-border pt-3">
             <h3 className="text-fh-label font-semibold text-fh-ink">Category Focus</h3>
-            {gaps.length === 0 ? (
+            {!analytics ? (
               <p className="mt-1.5 text-fh-meta text-fh-ink-2">
                 Category standing is unavailable until projections and scoring settings are in
                 place.
+              </p>
+            ) : gaps.length === 0 ? (
+              /* No gaps is a real result, not missing data: the team is not
+                 behind the field in any scored category. */
+              <p className="mt-1.5 text-fh-meta text-fh-ink-2">
+                Not behind the field in any category.
               </p>
             ) : (
               <ul className="mt-2 flex flex-col gap-1.5">
@@ -570,11 +576,17 @@ export default function DraftRoomPage() {
             <div className="border-t border-fh-border pt-3">
               <dt className="text-fh-ink-2">Category standing being addressed</dt>
               <dd className="mt-1.5 flex flex-col gap-1">
-                {gaps.map((gap) => (
-                  <span key={gap.key} className="text-fh-ink">
-                    {CATEGORY_BY_KEY[gap.key].label} — {gap.rank} of {gap.teams}
+                {gaps.length === 0 ? (
+                  <span className="text-fh-ink">
+                    None — the roster is not behind the field in any category.
                   </span>
-                ))}
+                ) : (
+                  gaps.map((gap) => (
+                    <span key={gap.key} className="text-fh-ink">
+                      {CATEGORY_BY_KEY[gap.key].label} — {gap.rank} of {gap.teams}
+                    </span>
+                  ))
+                )}
               </dd>
             </div>
           </dl>

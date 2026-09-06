@@ -295,12 +295,28 @@ function scarcityAt(available: Player[], positions: Position[], limit = 40): num
  * Entry point
  * ---------------------------------------------------------------------- */
 
+/**
+ * The categories the managed team is actually losing.
+ *
+ * A rank only counts as a gap if it is behind the field. Taking the worst
+ * three unconditionally is wrong whenever ranks tie — sorting equal ranks
+ * leaves them in key order, so a team sitting 3rd of 12 in everything would
+ * report Goals, Assists and Power-Play Points as "gaps" purely because they
+ * come first in the list, and every downstream reason would cite them. A team
+ * that is not behind anywhere has no gaps, and callers must handle an empty
+ * list rather than always receiving three.
+ *
+ * A category with no rank at all (nobody on the roster contributes to it, so
+ * there is nothing to rank) is treated as last, which is the honest reading:
+ * a team with no goalies really is losing the goalie categories.
+ */
 export function categoryGaps(
   categoryRanks: Partial<Record<CategoryKey, number>>,
   keys: CategoryKey[],
   teams: number,
   limit = 3,
 ): CategoryGap[] {
+  const behindTheField = (teams + 1) / 2;
   return keys
     .map((key) => ({
       key,
@@ -308,7 +324,10 @@ export function categoryGaps(
       rank: categoryRanks[key] ?? teams,
       teams,
     }))
-    .sort((a, b) => b.rank - a.rank)
+    .filter((entry) => entry.rank > behindTheField)
+    // Ties broken by key so the result is deterministic rather than an
+    // artifact of the order the categories happen to be declared in.
+    .sort((a, b) => b.rank - a.rank || a.key.localeCompare(b.key))
     .slice(0, limit);
 }
 
@@ -437,7 +456,7 @@ export function recommend(input: RecommendationInput): RecommendationResult {
     const { player, fit, impacts, replacement, scarcity, positionNeed } = entry;
     const returnRisk = estimateReturnRisk(player, nextPickOverall);
     const top = impacts.slice(0, 3);
-    const addressesGap = top.some((impact) => gapKeys.has(impact.key));
+    const addressesGap = top.some((impact) => gapKeys.has(impact.key) && impact.z > 0);
 
     const strategy =
       addressesGap || fit.fillsStartingSlot ? "Round Out the Team" : "Strengthen the Build";
@@ -539,7 +558,11 @@ export function postDraftWatchlist(
     .map((player) => {
       const replacement = replacementFor(available, player.eligibility.primary, teamCount);
       const impacts = impactsFor(player, replacement, keys, scales, weights);
-      const gapImpact = impacts.find((impact) => gapKeys.has(impact.key));
+      // Impacts are sorted by z, so this is the player's strongest
+      // contribution to a category the team is losing. The positive test
+      // matters: citing a gap the player does not actually help would put
+      // the same label on every row and say nothing about the player.
+      const gapImpact = impacts.find((impact) => gapKeys.has(impact.key) && impact.z > 0);
       const need = Math.max(...player.eligibility.positions.map((p) => openNeeds[p] ?? 0));
       const score =
         impacts.reduce((sum, impact) => sum + impact.z, 0) +
