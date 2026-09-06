@@ -1,0 +1,1 @@
+# fantasty-draft-assistant
