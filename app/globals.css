@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+ * Fantasy Hockey Draft Assistant — grayscale desktop design system.
+ *
+ * Deliberately grayscale: hierarchy comes from surface value, border weight,
+ * spacing and type — never from hue. State that would normally need a colour
+ * uses a pill, an icon or a stronger surface instead.
+ *
+ * Tokens keep the `fh-` prefix so utility names stay unambiguous against
+ * Tailwind's own scale (`bg-fh-surface` is clearly ours, `bg-surface` is not).
+ * ========================================================================== */
+
+@theme inline {
+  /* Surfaces */
+  --color-fh-bg: #f7f8fa;
+  --color-fh-surface: #ffffff;
+  --color-fh-subtle: #f3f4f6;
+  --color-fh-selected: #eceef1;
+  --color-fh-inverse: #25282d;
+
+  /* Text */
+  --color-fh-ink: #17191c;
+  --color-fh-ink-2: #5f6670;
+  --color-fh-ink-muted: #8c929b;
+  --color-fh-ink-disabled: #b5bac1;
+
+  /* Lines */
+  --color-fh-border: #e1e4e8;
+  --color-fh-border-strong: #cdd1d6;
+
+  /* Controls */
+  --color-fh-button: #26292e;
+  --color-fh-button-hover: #17191c;
+
+  --radius-fh-card: 6px;
+  --radius-fh-control: 6px;
+
+  /* Type scale — one token per role, no raw sizes in components. */
+  --text-fh-title: 28px;
+  --text-fh-title--line-height: 34px;
+  --text-fh-hero: 24px;
+  --text-fh-hero--line-height: 30px;
+  --text-fh-section: 20px;
+  --text-fh-section--line-height: 26px;
+  --text-fh-card: 16px;
+  --text-fh-card--line-height: 22px;
+  --text-fh-body: 14px;
+  --text-fh-body--line-height: 20px;
+  --text-fh-compact: 13px;
+  --text-fh-compact--line-height: 18px;
+  --text-fh-label: 12px;
+  --text-fh-label--line-height: 16px;
+  --text-fh-meta: 12px;
+  --text-fh-meta--line-height: 17px;
+}
+
+/* The app is light throughout, and native controls (checkbox, radio,
+   scrollbar) follow suit. `.fh-app` wraps the shell so the same rules apply
+   to anything rendered outside it, such as a portal. */
+:root,
+.fh-app {
+  color-scheme: light;
+  accent-color: #26292e;
+  background-color: #f7f8fa;
+  color: #17191c;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+:focus-visible {
+  outline: 2px solid #26292e;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+::selection {
+  background: #dfe2e6;
+  color: #17191c;
+}
+
+/* Compact scrollbars for the dense analytics tables. */
+.fh-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #cdd1d6 transparent;
+}
+
+@keyframes fh-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fh-toast {
+  animation: fh-toast-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fh-toast {
+    animation: none;
+  }
+}

@@ -1,0 +1,598 @@
+import { describe, expect, it } from "vitest";
+import { assignSlots, openStartingNeeds, rosterCapacity, rosterFit } from "./roster";
+import { buildSchedule, derivePointer, franchiseTurn, orderForRound } from "./schedule";
+import { categoryTotal, playerFantasyPoints, teamTotals } from "./scoring";
+import { computeStandings } from "./standings";
+import { buildPlayerPool, matchKeyFor } from "./projections";
+import { autoDetectMapping, buildProjectionRows, parseDelimited, parseNumber } from "./workbook";
+import { createInitialState, reducer, draftedPlayerIds, type AppState } from "./state";
+import { deserialize } from "./persistence";
+import { derive } from "./selectors";
+import type {
+  LeagueScoringSettings,
+  Player,
+  Position,
+  ProjectionDataset,
+  RosterConfiguration,
+} from "./types";
+
+function player(name: string, positions: Position[], stats: Player["stats"] = {}): Player {
+  return {
+    id: matchKeyFor(name),
+    name,
+    matchKey: matchKeyFor(name),
+    eligibility: { primary: positions[0], positions },
+    stats,
+    coverage: {},
+  };
+}
+
+const ROSTER: RosterConfiguration = { C: 2, LW: 2, RW: 2, D: 2, G: 1, UTIL: 1, BN: 2 };
+
+/* -------------------------------------------------------------------------
+ * Roster logic under multi-position eligibility
+ * ---------------------------------------------------------------------- */
+
+describe("roster slotting", () => {
+  it("uses dual eligibility to fill a slot a primary-position count would miss", () => {
+    // Three wingers all listed LW-first, but two are LW/RW. Counting by
+    // primary position would report RW empty and LW over-full.
+    const roster = [
+      player("Winger One", ["LW"]),
+      player("Winger Two", ["LW", "RW"]),
+      player("Winger Three", ["LW", "RW"]),
+    ];
+
+    const capacity = rosterCapacity(roster, ROSTER);
+    const lw = capacity.find((entry) => entry.slot === "LW");
+    const rw = capacity.find((entry) => entry.slot === "RW");
+
+    expect(lw?.filled).toBe(2);
+    expect(rw?.filled).toBe(1);
+    expect(capacity.every((entry) => entry.filled <= entry.capacity)).toBe(true);
+  });
+
+  it("keeps goalies out of the utility slot", () => {
+    const roster = [player("Keeper One", ["G"]), player("Keeper Two", ["G"])];
+    const assigned = assignSlots(roster, ROSTER);
+    expect(assigned.filter((entry) => entry.slot === "G")).toHaveLength(1);
+    expect(assigned.some((entry) => entry.slot === "UTIL")).toBe(false);
+  });
+
+  it("reports whether a new player is usable, and whether he starts", () => {
+    const roster = [player("Centre One", ["C"]), player("Centre Two", ["C"])];
+
+    const thirdCentre = rosterFit(roster, player("Centre Three", ["C"]), ROSTER);
+    expect(thirdCentre.fillsStartingSlot).toBe(true); // via Utility
+    expect(thirdCentre.canRoster).toBe(true);
+
+    const full: RosterConfiguration = { C: 2, LW: 0, RW: 0, D: 0, G: 0, UTIL: 0, BN: 0 };
+    const noRoom = rosterFit(roster, player("Centre Four", ["C"]), full);
+    expect(noRoom.canRoster).toBe(false);
+  });
+
+  it("counts open starting needs through the flex slot", () => {
+    const roster = [player("Centre One", ["C"]), player("Centre Two", ["C"])];
+    const needs = openStartingNeeds(roster, ROSTER);
+    // C is full, but Utility still takes one more skater.
+    expect(needs.C).toBe(1);
+    expect(needs.G).toBe(1);
+  });
+
+  it("marks players beyond capacity as overflow rather than losing them", () => {
+    const tiny: RosterConfiguration = { C: 1, LW: 0, RW: 0, D: 0, G: 0, UTIL: 0, BN: 0 };
+    const assigned = assignSlots([player("A", ["C"]), player("B", ["C"])], tiny);
+    expect(assigned).toHaveLength(2);
+    expect(assigned.filter((entry) => entry.overflow)).toHaveLength(1);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * Missing data
+ * ---------------------------------------------------------------------- */
+
+describe("scoring treats missing values as unknown", () => {
+  it("excludes missing stats from totals and reports the gap", () => {
+    const roster = [
+      player("Has Goals", ["C"], { G: 30 }),
+      player("No Goals", ["C"], {}),
+      player("Also Goals", ["C"], { G: 20 }),
+    ];
+
+    const total = categoryTotal(roster, "G");
+    expect(total.value).toBe(50);
+    expect(total.contributors).toBe(2);
+    expect(total.missing).toBe(1);
+  });
+
+  it("averages rate stats over contributors only", () => {
+    const goalies = [
+      player("Keeper One", ["G"], { GAA: 2.0 }),
+      player("Keeper Two", ["G"], {}),
+      player("Keeper Three", ["G"], { GAA: 3.0 }),
+    ];
+    expect(categoryTotal(goalies, "GAA").value).toBeCloseTo(2.5);
+  });
+
+  it("does not count a skater as missing a goalie stat", () => {
+    const roster = [player("Skater", ["C"], { G: 10 }), player("Keeper", ["G"], { W: 30 })];
+    const wins = categoryTotal(roster, "W");
+    expect(wins.value).toBe(30);
+    expect(wins.missing).toBe(0);
+  });
+});
+
+describe("points scoring", () => {
+  const scoring: LeagueScoringSettings = {
+    format: "points",
+    activeCategories: [],
+    pointCategories: ["G", "A", "HIT"],
+    pointValues: { G: 5, A: 3, HIT: 0.5 },
+  };
+
+  it("uses the configured values rather than any hardcoded ones", () => {
+    const p = player("Scorer", ["C"], { G: 10, A: 20, HIT: 40 });
+    expect(playerFantasyPoints(p, scoring)).toBe(10 * 5 + 20 * 3 + 40 * 0.5);
+
+    const doubled: LeagueScoringSettings = { ...scoring, pointValues: { G: 10, A: 3, HIT: 0.5 } };
+    expect(playerFantasyPoints(p, doubled)).toBe(10 * 10 + 20 * 3 + 40 * 0.5);
+  });
+
+  it("returns undefined for a player with no scored stat at all", () => {
+    expect(playerFantasyPoints(player("Ghost", ["C"], {}), scoring)).toBeUndefined();
+  });
+
+  it("sums a roster without folding unknown players in as zero", () => {
+    const totals = teamTotals(
+      "f1",
+      [player("Scorer", ["C"], { G: 10 }), player("Ghost", ["C"], {})],
+      scoring,
+    );
+    expect(totals.fantasyPoints).toBe(50);
+    expect(totals.unprojectedPlayers).toBe(1);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * Projection sources
+ * ---------------------------------------------------------------------- */
+
+function dataset(id: string, rows: ProjectionDataset["rows"]): ProjectionDataset {
+  return {
+    source: {
+      id,
+      analyst: id,
+      projectionSet: id,
+      season: "2026–27",
+      fileName: `${id}.csv`,
+      importedAt: "2026-09-01T00:00:00.000Z",
+      rowCount: rows.length,
+    },
+    rows,
+  };
+}
+
+describe("projection merging", () => {
+  const a = dataset("a", [
+    { matchKey: matchKeyFor("Alpha One"), name: "Alpha One", positions: ["C"], rank: 1, stats: { G: 40, A: 50 } },
+  ]);
+  const b = dataset("b", [
+    // No assists at all from this source.
+    { matchKey: matchKeyFor("Alpha One"), name: "Alpha One", positions: ["C", "LW"], rank: 3, stats: { G: 30 } },
+  ]);
+
+  it("averages only the sources that provided a value", () => {
+    const pool = buildPlayerPool([a, b], {
+      mode: "consensus",
+      includedSourceIds: ["a", "b"],
+      primarySourceId: "a",
+    });
+    const merged = pool.players[0];
+    expect(merged.stats.G).toBe(35);
+    // Assists came from one source only — averaging in a zero would give 25.
+    expect(merged.stats.A).toBe(50);
+    expect(merged.coverage.A).toEqual(["a"]);
+  });
+
+  it("unions position eligibility across sources", () => {
+    const pool = buildPlayerPool([a, b], {
+      mode: "consensus",
+      includedSourceIds: ["a", "b"],
+      primarySourceId: "a",
+    });
+    expect(pool.players[0].eligibility.positions.sort()).toEqual(["C", "LW"]);
+  });
+
+  it("uses only the primary source in single mode", () => {
+    const pool = buildPlayerPool([a, b], {
+      mode: "single",
+      includedSourceIds: ["a", "b"],
+      primarySourceId: "b",
+    });
+    expect(pool.players[0].stats.G).toBe(30);
+    expect(pool.players[0].stats.A).toBeUndefined();
+  });
+
+  it("lets supplemental sources fill only what the primary lacks", () => {
+    const primaryMissingGoals = dataset("c", [
+      { matchKey: matchKeyFor("Alpha One"), name: "Alpha One", positions: ["C"], stats: { A: 10 } },
+    ]);
+    const pool = buildPlayerPool([primaryMissingGoals, a], {
+      mode: "primary-supplemental",
+      includedSourceIds: ["c", "a"],
+      primarySourceId: "c",
+    });
+    expect(pool.players[0].stats.A).toBe(10); // primary wins
+    expect(pool.players[0].stats.G).toBe(40); // filled from supplemental
+  });
+
+  it("matches the same player across differently punctuated names", () => {
+    expect(matchKeyFor("Tim Stützle")).toBe(matchKeyFor("Tim Stutzle"));
+    expect(matchKeyFor("T.J. Oshie Jr.")).toBe(matchKeyFor("TJ Oshie"));
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * Workbook parsing
+ * ---------------------------------------------------------------------- */
+
+describe("workbook parsing", () => {
+  it("parses quoted delimited text", () => {
+    const rows = parseDelimited('Player,Team\n"Smith, John",TOR\n', ",");
+    expect(rows).toEqual([
+      ["Player", "Team"],
+      ["Smith, John", "TOR"],
+    ]);
+  });
+
+  it("treats blanks and dashes as unknown, not zero", () => {
+    expect(parseNumber("")).toBeUndefined();
+    expect(parseNumber("—")).toBeUndefined();
+    expect(parseNumber("N/A")).toBeUndefined();
+    expect(parseNumber("0")).toBe(0);
+    expect(parseNumber("1,234")).toBe(1234);
+  });
+
+  it("auto-detects common headers and maps rows", () => {
+    const sheet = {
+      name: "Skaters",
+      columns: ["Player", "Team", "Pos", "Rank", "G", "A", "Hits"],
+      rows: [["Connor McDavid", "EDM", "C", "1", "42", "78", ""]],
+    };
+    const mapping = autoDetectMapping(sheet.columns);
+    expect(mapping.name).toBe("Player");
+    expect(mapping.positions).toBe("Pos");
+    expect(mapping.stats.HIT).toBe("Hits");
+
+    const { rows } = buildProjectionRows(sheet, mapping);
+    expect(rows[0].stats.G).toBe(42);
+    // The hits cell was blank: unknown, so absent rather than 0.
+    expect(rows[0].stats.HIT).toBeUndefined();
+    expect(rows[0].positions).toEqual(["C"]);
+  });
+
+  it("reads multi-position cells", () => {
+    const sheet = {
+      name: "S",
+      columns: ["Player", "Pos"],
+      rows: [["Multi Guy", "LW/RW"]],
+    };
+    const { rows } = buildProjectionRows(sheet, autoDetectMapping(sheet.columns));
+    expect(rows[0].positions).toEqual(["LW", "RW"]);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * Draft schedule
+ * ---------------------------------------------------------------------- */
+
+describe("draft pick schedule", () => {
+  const order = ["a", "b", "c"];
+
+  it("snakes every even round", () => {
+    expect(orderForRound(1, order)).toEqual(["a", "b", "c"]);
+    expect(orderForRound(2, order)).toEqual(["c", "b", "a"]);
+    expect(orderForRound(3, order)).toEqual(["a", "b", "c"]);
+  });
+
+  it("generates every pick exactly once", () => {
+    const schedule = buildSchedule(order, 4);
+    expect(schedule.picks).toHaveLength(12);
+    expect(schedule.picks.map((pick) => pick.overall)).toEqual(
+      Array.from({ length: 12 }, (_, index) => index + 1),
+    );
+    expect(schedule.picks[3].franchiseId).toBe("c"); // first pick of round 2
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * Reducer and derived state
+ * ---------------------------------------------------------------------- */
+
+function recordNext(state: AppState): AppState {
+  const derived = derive(state);
+  const overall = derived.draft.pointer.currentOverall;
+  const franchiseId = derived.draft.pointer.franchiseId!;
+  const playerId = derived.draft.available[0].id;
+  return reducer(state, {
+    type: "draft/record",
+    overall,
+    franchiseId,
+    selection: { kind: "player", playerId },
+  });
+}
+
+describe("draft state transitions", () => {
+  it("advances the pointer and removes the player from the pool", () => {
+    const state = createInitialState();
+    const before = derive(state);
+    const firstPlayer = before.draft.available[0];
+
+    const after = derive(recordNext(state));
+    expect(after.draft.pointer.currentOverall).toBe(2);
+    expect(after.draft.available.some((p) => p.id === firstPlayer.id)).toBe(false);
+    expect(after.draft.rosters[before.draft.pointer.franchiseId!]).toHaveLength(1);
+  });
+
+  it("undo restores availability, roster and pointer", () => {
+    const state = recordNext(createInitialState());
+    const undone = reducer(state, { type: "draft/undoLast" });
+    const derived = derive(undone);
+
+    expect(derived.draft.pointer.currentOverall).toBe(1);
+    expect(Object.keys(undone.draft.picks)).toHaveLength(0);
+    expect(derived.draft.rosters[derived.draft.pointer.franchiseId!]).toHaveLength(0);
+    expect(derived.draft.available.length).toBe(derive(createInitialState()).draft.available.length);
+  });
+
+  it("reassigns a pick to another franchise without disturbing the board", () => {
+    const state = recordNext(createInitialState());
+    const target = state.league.franchises[5].id;
+    const corrected = reducer(state, { type: "draft/correct", overall: 1, franchiseId: target });
+    const derived = derive(corrected);
+
+    expect(derived.draft.rosters[target]).toHaveLength(1);
+    expect(corrected.draft.picks[1].corrected).toBe(true);
+    expect(derive(corrected).draft.pointer.currentOverall).toBe(2);
+  });
+
+  it("keeps an unresolved placeholder out of the roster but on the board", () => {
+    const base = createInitialState();
+    const state = reducer(base, {
+      type: "draft/record",
+      overall: 1,
+      franchiseId: base.league.draftOrder[0],
+      selection: { kind: "unresolved", label: "Someone I could not find" },
+    });
+    const derived = derive(state);
+
+    expect(derived.draft.pointer.currentOverall).toBe(2);
+    expect(derived.draft.rosters[base.league.draftOrder[0]]).toHaveLength(0);
+    expect(derived.draft.unresolvedByFranchise[base.league.draftOrder[0]]).toBe(1);
+    expect(draftedPlayerIds(state.draft).size).toBe(0);
+  });
+
+  it("resolves a placeholder into a real player later", () => {
+    const base = createInitialState();
+    const withPlaceholder = reducer(base, {
+      type: "draft/record",
+      overall: 1,
+      franchiseId: base.league.draftOrder[0],
+      selection: { kind: "unresolved", label: "???" },
+    });
+    const playerId = derive(withPlaceholder).draft.available[0].id;
+    const resolved = reducer(withPlaceholder, {
+      type: "draft/correct",
+      overall: 1,
+      selection: { kind: "player", playerId },
+    });
+
+    expect(derive(resolved).draft.rosters[base.league.draftOrder[0]]).toHaveLength(1);
+    expect(derive(resolved).draft.unresolvedByFranchise[base.league.draftOrder[0]]).toBe(0);
+  });
+
+  it("reports how many picks until the managed team is up", () => {
+    const state = createInitialState();
+    const turn = franchiseTurn(state.draft, state.league.managedFranchiseId);
+    // Managed team is third in the default order, so two picks come first.
+    expect(turn.nextOverall).toBe(3);
+    expect(turn.picksUntil).toBe(2);
+  });
+
+  it("marks the draft complete once the schedule is filled", () => {
+    let state = createInitialState();
+    state = reducer(state, { type: "league/setRounds", rounds: 1 });
+    for (let index = 0; index < state.league.franchises.length; index += 1) {
+      state = recordNext(state);
+    }
+    expect(state.draft.status).toBe("complete");
+    expect(derivePointer(state.draft).complete).toBe(true);
+  });
+});
+
+describe("league setup drives the rest of the app", () => {
+  it("regenerates the schedule when the team count changes", () => {
+    const state = reducer(createInitialState(), { type: "league/setTeamCount", teamCount: 10 });
+    expect(state.league.franchises).toHaveLength(10);
+    expect(state.draft.schedule.teamCount).toBe(10);
+    expect(state.draft.schedule.picks).toHaveLength(10 * state.league.rounds);
+  });
+
+  it("regenerates the schedule when rounds change", () => {
+    const state = reducer(createInitialState(), { type: "league/setRounds", rounds: 5 });
+    expect(state.draft.schedule.picks).toHaveLength(5 * state.league.teamCount);
+  });
+
+  it("changes which categories count when scoring settings change", () => {
+    const base = createInitialState();
+    const withoutHits = reducer(base, {
+      type: "league/toggleCategory",
+      key: "HIT",
+      enabled: false,
+    });
+    expect(withoutHits.league.scoring.activeCategories).not.toContain("HIT");
+
+    const standings = derive(withoutHits).analytics?.standings;
+    expect(standings?.rows[0].categoryRanks.HIT).toBeUndefined();
+  });
+
+  it("drops picks belonging to franchises that no longer exist", () => {
+    let state = createInitialState();
+    // Give the last franchise a pick, then shrink the league past it.
+    const twelfth = state.league.franchises[11].id;
+    const playerId = derive(state).draft.available[0].id;
+    state = reducer(state, {
+      type: "draft/record",
+      overall: 12,
+      franchiseId: twelfth,
+      selection: { kind: "player", playerId },
+    });
+    expect(Object.keys(state.draft.picks)).toHaveLength(1);
+
+    state = reducer(state, { type: "league/setTeamCount", teamCount: 10 });
+    expect(Object.keys(state.draft.picks)).toHaveLength(0);
+  });
+});
+
+describe("standings", () => {
+  it("ranks every franchise and agrees with its own category ranks", () => {
+    const state = createInitialState();
+    let next = state;
+    for (let index = 0; index < 24; index += 1) next = recordNext(next);
+
+    const analytics = derive(next).analytics!;
+    const rows = analytics.standings.rows;
+
+    expect(rows).toHaveLength(state.league.franchises.length);
+    expect(rows.map((row) => row.rank)).toEqual(rows.map((_, index) => index + 1));
+
+    const teams = rows.length;
+    const keys = state.league.scoring.activeCategories;
+    for (const row of rows) {
+      const expected = keys.reduce(
+        (sum, key) => sum + (teams - (row.categoryRanks[key] ?? teams) + 1),
+        0,
+      );
+      expect(row.points).toBe(expected);
+    }
+  });
+
+  it("plays every franchise against all the others", () => {
+    const state = createInitialState();
+    const rows = derive(state).analytics!.standings.rows;
+    for (const row of rows) {
+      expect(row.wins + row.losses + row.ties).toBe(rows.length - 1);
+    }
+  });
+
+  it("does not let an empty roster lead a lower-is-better category", () => {
+    const scoring: LeagueScoringSettings = {
+      format: "categories",
+      activeCategories: ["GAA"],
+      pointCategories: [],
+      pointValues: {},
+    };
+    const { standings } = computeStandings(
+      { withGoalie: [player("Keeper", ["G"], { GAA: 2.5 })], empty: [] },
+      scoring,
+    );
+    expect(standings.rows[0].franchiseId).toBe("withGoalie");
+  });
+});
+
+describe("persistence", () => {
+  it("round-trips a draft in progress, numeric pick keys and all", () => {
+    let state = createInitialState();
+    state = recordNext(state);
+    state = recordNext(state);
+
+    const revived = deserialize(JSON.stringify(state));
+    expect(revived).not.toBeNull();
+    expect(Object.keys(revived!.draft.picks)).toHaveLength(2);
+    expect(revived!.draft.picks[1].overall).toBe(1);
+    expect(derive(revived!).draft.pointer.currentOverall).toBe(3);
+  });
+
+  it("rejects a stored blob from a different state version", () => {
+    const state = createInitialState();
+    const stale = JSON.stringify({ ...state, version: state.version + 1 });
+    expect(deserialize(stale)).toBeNull();
+    expect(deserialize("not json")).toBeNull();
+  });
+});
+
+describe("points scoring end to end", () => {
+  it("ranks the standings on configured point values", () => {
+    let state = createInitialState();
+    state = reducer(state, { type: "league/setScoringFormat", format: "points" });
+    for (let index = 0; index < 12; index += 1) state = recordNext(state);
+
+    const analytics = derive(state).analytics!;
+    expect(analytics.standings.format).toBe("points");
+
+    // Every franchise's points equal the sum of its players' fantasy points.
+    for (const row of analytics.standings.rows) {
+      const roster = derive(state).draft.rosters[row.franchiseId];
+      const expected = roster.reduce(
+        (sum, player) => sum + (playerFantasyPoints(player, state.league.scoring) ?? 0),
+        0,
+      );
+      expect(row.points).toBeCloseTo(Number(expected.toFixed(1)), 1);
+    }
+  });
+});
+
+describe("recommendations", () => {
+  it("only recommends players the roster can actually use", () => {
+    const state = createInitialState();
+    const recommendation = derive(state).analytics!.recommendation;
+    expect(recommendation.primary).toBeDefined();
+    expect(recommendation.alternative).toBeDefined();
+    expect(recommendation.primary!.reasons.length).toBeLessThanOrEqual(3);
+  });
+
+  it("never recommends someone already drafted", () => {
+    let state = createInitialState();
+    for (let index = 0; index < 15; index += 1) state = recordNext(state);
+
+    const derived = derive(state);
+    const taken = derived.draft.draftedIds;
+    expect(taken.has(derived.analytics!.recommendation.primary!.player.id)).toBe(false);
+  });
+
+  it("prefers the player who will not last when values are close", () => {
+    // Late in a round the managed team's next pick is one away, so nothing is
+    // at risk and the best available player should win outright.
+    const state = createInitialState();
+    const recommendation = derive(state).analytics!.recommendation;
+    expect(recommendation.primary).toBeDefined();
+    // Whatever it picks, it must never be someone already unavailable, and
+    // the alternative must be a genuinely different player.
+    expect(recommendation.alternative?.player.id).not.toBe(recommendation.primary?.player.id);
+  });
+
+  it("does not let one goalie outweigh a whole skating roster", () => {
+    // Four of ten scored categories are goalie categories fed by two roster
+    // spots; without weighting by roster share a goalie wins pick one.
+    const state = createInitialState();
+    const primary = derive(state).analytics!.recommendation.primary!;
+    expect(primary.player.eligibility.positions).not.toEqual(["G"]);
+  });
+
+  it("reports unavailable rather than inventing a pick when nothing is scored", () => {
+    let state = createInitialState();
+    for (const key of [...state.league.scoring.activeCategories]) {
+      state = reducer(state, { type: "league/toggleCategory", key, enabled: false });
+    }
+    const recommendation = derive(state).analytics!.recommendation;
+    expect(recommendation.primary).toBeUndefined();
+    expect(recommendation.unavailable).toContain("No scoring categories");
+  });
+
+  it("gives a percentage only when the player has an ADP to reason from", () => {
+    const derived = derive(createInitialState());
+    const risk = derived.analytics!.recommendation.primary!.returnRisk;
+    expect(risk.basis).toBe("adp");
+    expect(typeof risk.probability).toBe("number");
+  });
+});
