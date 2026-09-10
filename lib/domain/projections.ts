@@ -195,6 +195,9 @@ export function buildPlayerPool(
       rankValue,
       adp,
       gamesPlayed,
+      // Any source saying "kept" is enough to raise it as a suggestion; the
+      // assignment itself still has to be made by hand.
+      keeperFlag: rows.some((entry) => entry.row.keeperFlag === true),
       stats,
       coverage,
     };
@@ -221,6 +224,7 @@ export function buildPlayerPool(
       rank: ranked ? index + 1 : undefined,
       adp: entry.adp !== undefined ? Math.round(entry.adp) : undefined,
       gamesPlayed: entry.gamesPlayed !== undefined ? Math.round(entry.gamesPlayed) : undefined,
+      keeperFlag: entry.keeperFlag,
       stats: entry.stats,
       coverage: entry.coverage,
     };

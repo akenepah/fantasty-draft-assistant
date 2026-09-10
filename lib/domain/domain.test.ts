@@ -680,3 +680,143 @@ describe("recommendations", () => {
     expect(formatReturnChance(99)).toBe("99%");
   });
 });
+
+/* -------------------------------------------------------------------------
+ * Keepers
+ * ---------------------------------------------------------------------- */
+
+describe("keeper leagues", () => {
+  /** A keeper league with `count` players kept by the managed franchise. */
+  function withKeepers(count: number) {
+    let state = reducer(createInitialState(), {
+      type: "league/setLeagueType",
+      leagueType: "keeper",
+    });
+    const managedId = state.league.managedFranchiseId;
+    const kept = derive(state).draft.pool.players.slice(0, count);
+    for (const player of kept) {
+      state = reducer(state, {
+        type: "league/assignKeeper",
+        playerId: player.id,
+        franchiseId: managedId,
+      });
+    }
+    return { state, kept, managedId };
+  }
+
+  it("takes a kept player out of the draft pool", () => {
+    const { state, kept } = withKeepers(3);
+    const available = derive(state).draft.available;
+    for (const player of kept) {
+      expect(available.some((candidate) => candidate.id === player.id)).toBe(false);
+    }
+    expect(derive(state).draft.keeperIds.size).toBe(3);
+  });
+
+  it("seeds the opening roster and spends the capacity", () => {
+    const { state, kept, managedId } = withKeepers(3);
+    const draft = derive(state).draft;
+
+    expect(draft.rosters[managedId].map((p) => p.id)).toEqual(kept.map((p) => p.id));
+    // No pick has been recorded, yet three slots are already spoken for.
+    expect(draft.pointer.recordedPicks).toBe(0);
+    const filled = draft.managedCapacity.reduce((sum, entry) => sum + entry.filled, 0);
+    expect(filled).toBe(3);
+  });
+
+  it("counts kept players in projections and standings", () => {
+    const { state, managedId } = withKeepers(3);
+    const row = derive(state).analytics!.standings.rows.find((r) => r.franchiseId === managedId)!;
+    const goals = derive(state).analytics!.totals[managedId].totals.G!;
+    expect(goals.contributors).toBe(3);
+    expect(goals.value).toBeGreaterThan(0);
+    // A team with three elite forwards and eleven empty rosters around it
+    // should not be sitting mid-table by accident.
+    expect(row.points).toBeGreaterThan(0);
+  });
+
+  it("ignores keepers while the league is redraft", () => {
+    const { state, kept } = withKeepers(3);
+    const redraft = reducer(state, { type: "league/setLeagueType", leagueType: "redraft" });
+    const draft = derive(redraft).draft;
+
+    expect(draft.keeperIds.size).toBe(0);
+    expect(draft.available.some((c) => c.id === kept[0].id)).toBe(true);
+    // The assignments survive the round trip rather than being destroyed.
+    expect(redraft.league.keepers).toHaveLength(3);
+  });
+
+  it("moves a player rather than keeping him twice", () => {
+    const { state, kept } = withKeepers(1);
+    const other = state.league.franchises.find(
+      (f) => f.id !== state.league.managedFranchiseId,
+    )!;
+    const moved = reducer(state, {
+      type: "league/assignKeeper",
+      playerId: kept[0].id,
+      franchiseId: other.id,
+    });
+
+    expect(moved.league.keepers).toHaveLength(1);
+    expect(moved.league.keepers[0].franchiseId).toBe(other.id);
+    expect(derive(moved).draft.rosters[other.id]).toHaveLength(1);
+    expect(derive(moved).draft.rosters[state.league.managedFranchiseId]).toHaveLength(0);
+  });
+
+  it("drops keepers belonging to a franchise that no longer exists", () => {
+    let { state } = withKeepers(0);
+    const last = state.league.franchises[11];
+    state = reducer(state, {
+      type: "league/assignKeeper",
+      playerId: derive(state).draft.pool.players[0].id,
+      franchiseId: last.id,
+    });
+    expect(state.league.keepers).toHaveLength(1);
+
+    const smaller = reducer(state, { type: "league/setTeamCount", teamCount: 10 });
+    expect(smaller.league.keepers).toHaveLength(0);
+  });
+
+  it("keeps a player who has lost his projection on the roster", () => {
+    let { state } = withKeepers(0);
+    state = reducer(state, {
+      type: "league/assignKeeper",
+      playerId: "nobody-in-any-source",
+      franchiseId: state.league.managedFranchiseId,
+    });
+    const draft = derive(state).draft;
+    expect(draft.unresolvedByFranchise[state.league.managedFranchiseId]).toBe(1);
+  });
+
+  it("reads a keeper column as a hint that carries no owner", () => {
+    const sheet = parseDelimited(
+      "NAME,POS,KEEP?,G\nAlpha One,C,Y,40\nBeta Two,LW,N,30\nGamma Three,RW,,20\n",
+      ",",
+    );
+    const columns = sheet[0];
+    const mapping = autoDetectMapping(columns);
+    expect(mapping.keeperFlag).toBe("KEEP?");
+
+    const { rows } = buildProjectionRows(
+      { name: "s", columns, rows: sheet.slice(1) },
+      mapping,
+    );
+    expect(rows.map((row) => row.keeperFlag)).toEqual([true, false, undefined]);
+    // Nothing in a projection row can name a franchise, so a flag alone can
+    // never make a player unavailable.
+    expect(Object.keys(rows[0])).not.toContain("franchiseId");
+  });
+
+  it("defaults keepers on state written before the field existed", () => {
+    const legacy = createInitialState() as AppState & { league: { keepers?: unknown } };
+    const raw = JSON.stringify(legacy);
+    const withoutField = JSON.parse(raw) as Record<string, { keepers?: unknown }>;
+    delete (withoutField.league as { keepers?: unknown }).keepers;
+
+    const revived = deserialize(JSON.stringify(withoutField));
+    expect(revived).not.toBeNull();
+    expect(revived!.league.keepers).toEqual([]);
+    // The draft it was carrying is still there.
+    expect(revived!.draft.schedule.picks.length).toBeGreaterThan(0);
+  });
+});

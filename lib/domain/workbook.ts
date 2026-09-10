@@ -134,6 +134,7 @@ export type ColumnMapping = {
   rank?: string;
   adp?: string;
   gamesPlayed?: string;
+  keeperFlag?: string;
   stats: Partial<Record<CategoryKey, string>>;
 };
 
@@ -144,7 +145,20 @@ const FIELD_ALIASES: Record<string, string[]> = {
   rank: ["rank", "overall rank", "rk", "ovr", "overall"],
   adp: ["adp", "yahoo adp", "avg draft position", "average draft position"],
   gamesPlayed: ["gp", "games", "games played"],
+  keeperFlag: ["keep", "keep?", "keeper", "keeper?", "kept"],
 };
+
+/** Cell values a keeper column uses to mean yes. */
+const KEEPER_TRUE = new Set(["y", "yes", "true", "1", "k", "keep", "keeper", "x"]);
+
+export function parseKeeperFlag(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const text = raw.trim().toLowerCase();
+  if (text === "") return undefined;
+  // An explicit "N" is a real answer — not kept — and distinct from a blank
+  // cell, which says nothing either way.
+  return KEEPER_TRUE.has(text);
+}
 
 const STAT_ALIASES: Partial<Record<CategoryKey, string[]>> = {
   G: ["g", "goals"],
@@ -189,6 +203,7 @@ export function autoDetectMapping(columns: string[]): ColumnMapping {
     rank: find(FIELD_ALIASES.rank),
     adp: find(FIELD_ALIASES.adp),
     gamesPlayed: find(FIELD_ALIASES.gamesPlayed),
+    keeperFlag: find(FIELD_ALIASES.keeperFlag),
     stats,
   };
 }
@@ -230,6 +245,7 @@ export function buildProjectionRows(sheet: RawSheet, mapping: ColumnMapping): Ma
   const rankIndex = indexOf(mapping.rank);
   const adpIndex = indexOf(mapping.adp);
   const gamesIndex = indexOf(mapping.gamesPlayed);
+  const keeperIndex = indexOf(mapping.keeperFlag);
 
   const statIndexes = Object.entries(mapping.stats)
     .map(([key, column]) => ({ key: key as CategoryKey, index: indexOf(column) }))
@@ -263,6 +279,7 @@ export function buildProjectionRows(sheet: RawSheet, mapping: ColumnMapping): Ma
       rank: rankIndex >= 0 ? parseNumber(raw[rankIndex]) : undefined,
       adp: adpIndex >= 0 ? parseNumber(raw[adpIndex]) : undefined,
       gamesPlayed: gamesIndex >= 0 ? parseNumber(raw[gamesIndex]) : undefined,
+      keeperFlag: keeperIndex >= 0 ? parseKeeperFlag(raw[keeperIndex]) : undefined,
       stats,
     });
   }

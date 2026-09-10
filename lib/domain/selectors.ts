@@ -29,6 +29,8 @@ export type DraftState = {
   /** Players not yet taken, in pool order. */
   available: Player[];
   draftedIds: Set<string>;
+  /** Players owned before the draft; empty outside a keeper league. */
+  keeperIds: Set<string>;
   /** Resolved players by franchise, in the order they were drafted. */
   rosters: Record<string, Player[]>;
   /** Picks recorded against a placeholder, by franchise. */
@@ -81,7 +83,16 @@ export function derive(state: AppState): Derived {
 function deriveDraft(state: AppState): DraftState {
   const pool = buildPlayerPool(state.sources, state.projectionConfig);
   const draftedIds = draftedPlayerIds(state.draft);
-  const available = pool.players.filter((player) => !draftedIds.has(player.id));
+
+  // Keepers are owned before pick one, so they are opening roster state rather
+  // than draft history: they fill slots, count against capacity, and are not
+  // draftable. Only a keeper league has them.
+  const keepers = state.league.leagueType === "keeper" ? state.league.keepers : [];
+  const keeperIds = new Set(keepers.map((keeper) => keeper.playerId));
+
+  const available = pool.players.filter(
+    (player) => !draftedIds.has(player.id) && !keeperIds.has(player.id),
+  );
 
   const rosters: Record<string, Player[]> = Object.fromEntries(
     state.league.franchises.map((franchise) => [franchise.id, [] as Player[]]),
@@ -89,6 +100,16 @@ function deriveDraft(state: AppState): DraftState {
   const unresolvedByFranchise: Record<string, number> = Object.fromEntries(
     state.league.franchises.map((franchise) => [franchise.id, 0]),
   );
+
+  // Before any pick: a kept player already occupies his spot in round one.
+  for (const keeper of keepers) {
+    if (!(keeper.franchiseId in rosters)) continue;
+    const player = pool.byId[keeper.playerId];
+    // As with a pick, a keeper can outlive the source that projected him. He
+    // still holds the roster spot; he just has no numbers behind him.
+    if (player) rosters[keeper.franchiseId].push(player);
+    else unresolvedByFranchise[keeper.franchiseId] += 1;
+  }
 
   const ordered = Object.values(state.draft.picks).sort((a, b) => a.overall - b.overall);
   for (const pick of ordered) {
@@ -112,6 +133,7 @@ function deriveDraft(state: AppState): DraftState {
     pool,
     available,
     draftedIds,
+    keeperIds,
     rosters,
     unresolvedByFranchise,
     unresolvedTotal: Object.values(unresolvedByFranchise).reduce((sum, n) => sum + n, 0),

@@ -73,6 +73,12 @@ export type Player = {
   /** Average draft position, when a source provides one. */
   adp?: number;
   gamesPlayed?: number;
+  /**
+   * At least one source marked this player as kept. Used only to suggest
+   * candidates on the Keeper Assignments screen — it carries no franchise, so
+   * it never makes a player unavailable on its own.
+   */
+  keeperFlag?: boolean;
   stats: StatLine;
   /** Which sources contributed to each stat, for coverage reporting. */
   coverage: Partial<Record<CategoryKey, string[]>>;
@@ -105,6 +111,19 @@ export type Franchise = {
   name: string;
 };
 
+/**
+ * A player already owned by a franchise before the draft opens.
+ *
+ * Ownership is only ever what the user confirmed. A projection file may mark a
+ * player as a keeper, but it does not know *whose* keeper he is — a flag alone
+ * can never put a player on a roster, so this is written by hand and nothing
+ * infers it from an import.
+ */
+export type KeeperAssignment = {
+  playerId: string;
+  franchiseId: string;
+};
+
 export type League = {
   id: string;
   name: string;
@@ -116,6 +135,11 @@ export type League = {
   scoring: LeagueScoringSettings;
   draftType: "snake";
   leagueType: "redraft" | "keeper";
+  /**
+   * Opening roster state for a keeper league: owned before pick one, never in
+   * the draft pool. Ignored while the league type is redraft.
+   */
+  keepers: KeeperAssignment[];
   rounds: number;
   /** Franchise ids in round-one order; later rounds snake from this. */
   draftOrder: string[];
@@ -148,6 +172,12 @@ export type ProjectionRow = {
   rank?: number;
   adp?: number;
   gamesPlayed?: number;
+  /**
+   * The source marked this player as kept. A hint for the Keeper Assignments
+   * screen only — it says nothing about *which* franchise keeps him, so it can
+   * never put him on a roster by itself.
+   */
+  keeperFlag?: boolean;
   stats: StatLine;
 };
 

@@ -7,6 +7,7 @@ import { FormField, SelectField, TextInput } from "../ui/Fields";
 import { teamAbbreviation } from "../ui/TeamBadge";
 import { cn } from "../ui/cn";
 import { useAppState } from "../AppStateProvider";
+import { KeeperAssignments } from "./KeeperAssignments";
 import { totalRosterSpots } from "@/lib/domain/state";
 
 /**
@@ -159,6 +160,10 @@ export function DraftSettings() {
           ))}
         </ol>
       </div>
+
+      {/* Keepers only exist in a keeper league; nothing about a redraft
+          league has an opening roster to configure. */}
+      {league.leagueType === "keeper" && <KeeperAssignments />}
     </SectionCard>
   );
 }

@@ -109,6 +109,7 @@ export function createInitialState(): AppState {
     },
     draftType: "snake",
     leagueType: "redraft",
+    keepers: [],
     rounds,
     draftOrder,
   };
@@ -149,6 +150,9 @@ export type Action =
   | { type: "league/toggleCategory"; key: CategoryKey; enabled: boolean }
   | { type: "league/setPointValue"; key: CategoryKey; value: number }
   | { type: "league/setLeagueType"; leagueType: "redraft" | "keeper" }
+  | { type: "league/assignKeeper"; playerId: string; franchiseId: string }
+  | { type: "league/removeKeeper"; playerId: string }
+  | { type: "league/clearKeepers" }
   | { type: "league/setRounds"; rounds: number }
   | { type: "league/setDraftOrder"; order: string[] }
   | { type: "league/reset" }
@@ -178,6 +182,11 @@ export type Action =
 function withSchedule(state: AppState, league: League): AppState {
   const schedule = buildSchedule(league.draftOrder, league.rounds);
   const valid = new Set(league.franchises.map((franchise) => franchise.id));
+
+  // A keeper assigned to a franchise that no longer exists would otherwise
+  // hold a roster spot nobody can see or clear.
+  const keepers = league.keepers.filter((keeper) => valid.has(keeper.franchiseId));
+  if (keepers.length !== league.keepers.length) league = { ...league, keepers };
 
   const picks: Record<number, DraftPick> = {};
   for (const [key, pick] of Object.entries(state.draft.picks)) {
@@ -294,7 +303,32 @@ export function reducer(state: AppState, action: Action): AppState {
       };
 
     case "league/setLeagueType":
+      // Switching back to redraft keeps the assignments rather than deleting
+      // them: selectors ignore keepers outside a keeper league, so flipping
+      // the type twice by accident does not destroy the work of entering them.
       return { ...state, league: { ...state.league, leagueType: action.leagueType } };
+
+    case "league/assignKeeper": {
+      if (!state.league.franchises.some((f) => f.id === action.franchiseId)) return state;
+      // A player is kept by exactly one franchise; re-assigning moves him.
+      const keepers = state.league.keepers.filter(
+        (keeper) => keeper.playerId !== action.playerId,
+      );
+      keepers.push({ playerId: action.playerId, franchiseId: action.franchiseId });
+      return { ...state, league: { ...state.league, keepers } };
+    }
+
+    case "league/removeKeeper":
+      return {
+        ...state,
+        league: {
+          ...state.league,
+          keepers: state.league.keepers.filter((keeper) => keeper.playerId !== action.playerId),
+        },
+      };
+
+    case "league/clearKeepers":
+      return { ...state, league: { ...state.league, keepers: [] } };
 
     case "league/setRounds":
       return withSchedule(state, {

@@ -37,6 +37,14 @@ export function deserialize(raw: string): AppState | null {
 
     return {
       ...(parsed as AppState),
+      league: {
+        ...parsed.league,
+        // Added after the first release. A blob written before keepers
+        // existed is still perfectly good state, and discarding a live draft
+        // over a field that safely defaults to empty would be the worst
+        // possible trade — so fill it in rather than bumping the version.
+        keepers: parsed.league.keepers ?? [],
+      },
       draft: { ...parsed.draft, picks },
     };
   } catch {
