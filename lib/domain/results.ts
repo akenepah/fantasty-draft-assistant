@@ -86,11 +86,68 @@ export function draftHighlights(
   return highlights;
 }
 
+/**
+ * Every settled cell on the board, in schedule order.
+ *
+ * Keeper cells and recorded picks are the same kind of thing to a reader —
+ * "this seat is taken, by this player, for this franchise" — so the board is
+ * derived once here and every screen renders the same list. Open cells are
+ * left out; the pointer is what says where the draft actually is.
+ */
+export type BoardCell = {
+  overall: number;
+  round: number;
+  slotInRound: number;
+  franchiseId: string;
+  kind: "keeper" | "pick";
+  playerId?: string;
+  /** Present when the pick was recorded against a placeholder name. */
+  unresolvedLabel?: string;
+};
+
+export function boardCells(
+  draft: Draft,
+  keeperCellByOverall: ReadonlyMap<number, string>,
+): BoardCell[] {
+  const cells: BoardCell[] = [];
+
+  for (const scheduled of draft.schedule.picks) {
+    const keeperPlayerId = keeperCellByOverall.get(scheduled.overall);
+    if (keeperPlayerId !== undefined) {
+      cells.push({
+        overall: scheduled.overall,
+        round: scheduled.round,
+        slotInRound: scheduled.slotInRound,
+        // A keeper belongs to the franchise whose cell it is, by construction.
+        franchiseId: scheduled.franchiseId,
+        kind: "keeper",
+        playerId: keeperPlayerId,
+      });
+      continue;
+    }
+
+    const pick = draft.picks[scheduled.overall];
+    if (!pick) continue;
+    cells.push({
+      overall: pick.overall,
+      round: pick.round,
+      slotInRound: pick.slotInRound,
+      franchiseId: pick.franchiseId,
+      kind: "pick",
+      playerId: pick.selection.kind === "player" ? pick.selection.playerId : undefined,
+      unresolvedLabel: pick.selection.kind === "unresolved" ? pick.selection.label : undefined,
+    });
+  }
+
+  return cells;
+}
+
 /** A flat CSV of the board, for the Export Results button. */
 export function draftBoardCsv(
   draft: Draft,
   pool: PlayerPool,
   franchises: Franchise[],
+  keeperCellByOverall: ReadonlyMap<number, string> = new Map(),
 ): string {
   const nameFor = (id: string) =>
     franchises.find((franchise) => franchise.id === id)?.name ?? "Unknown";
@@ -98,25 +155,25 @@ export function draftBoardCsv(
   const escape = (value: string) =>
     /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 
-  const header = ["Pick", "Round", "Player", "Positions", "NHL Team", "ADP", "Drafted By"];
-  const lines = Object.values(draft.picks)
-    .sort((a, b) => a.overall - b.overall)
-    .map((pick) => {
-      const player =
-        pick.selection.kind === "player" ? pool.byId[pick.selection.playerId] : undefined;
-      return [
-        String(pick.overall),
-        String(pick.round),
-        player?.name ??
-          (pick.selection.kind === "unresolved" ? `${pick.selection.label} (unresolved)` : ""),
-        player?.eligibility.positions.join("/") ?? "",
-        player?.team ?? "",
-        player?.adp !== undefined ? String(player.adp) : "",
-        nameFor(pick.franchiseId),
-      ]
-        .map(escape)
-        .join(",");
-    });
+  // "How" distinguishes a keeper from a selection without changing the shape
+  // of the export or the meaning of any other column.
+  const header = ["Pick", "Round", "Player", "Positions", "NHL Team", "ADP", "Team", "How"];
+  const lines = boardCells(draft, keeperCellByOverall).map((cell) => {
+    const player = cell.playerId !== undefined ? pool.byId[cell.playerId] : undefined;
+    return [
+      String(cell.overall),
+      String(cell.round),
+      player?.name ??
+        (cell.unresolvedLabel !== undefined ? `${cell.unresolvedLabel} (unresolved)` : ""),
+      player?.eligibility.positions.join("/") ?? "",
+      player?.team ?? "",
+      player?.adp !== undefined ? String(player.adp) : "",
+      nameFor(cell.franchiseId),
+      cell.kind === "keeper" ? "Keeper" : "Drafted",
+    ]
+      .map(escape)
+      .join(",");
+  });
 
   return [header.join(","), ...lines].join("\n");
 }

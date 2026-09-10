@@ -28,6 +28,7 @@ import { CorrectionsDrawer } from "@/components/draft-room/CorrectionsDrawer";
 import { useAppState } from "@/components/AppStateProvider";
 import { CATEGORY_BY_KEY, ROSTER_SLOT_SHORT } from "@/lib/domain/categories";
 import { openStartingNeeds } from "@/lib/domain/roster";
+import { boardCells } from "@/lib/domain/results";
 import type { Player } from "@/lib/domain/types";
 
 /** A compact key/value in the draft status strip. */
@@ -125,6 +126,10 @@ export default function DraftRoomPage() {
     () => openStartingNeeds(draftState.managedRoster, league.roster),
     [draftState.managedRoster, league.roster],
   );
+
+  // One board for the history modal: keeper cells and recorded picks in
+  // schedule order, exactly as Draft Results reads them.
+  const history = boardCells(state.draft, draftState.keeperCellByOverall);
 
   const gaps = analytics?.recommendation.gaps ?? [];
   const openSlots = draftState.managedCapacity.filter(
@@ -472,44 +477,51 @@ export default function DraftRoomPage() {
       {/* ---------------- Progressive disclosure ---------------- */}
       <Modal
         open={showAllPicks}
-        title="All Recorded Picks"
-        description={`${pointer.recordedPicks} of ${pointer.totalPicks} scheduled picks recorded.`}
+        title="Draft History"
+        description={
+          pointer.keeperPicks > 0
+            ? `${pointer.completedPicks} of ${pointer.totalPicks} cells settled — ${pointer.recordedPicks} recorded, ${pointer.keeperPicks} held by keepers.`
+            : `${pointer.recordedPicks} of ${pointer.totalPicks} scheduled picks recorded.`
+        }
         onClose={() => setShowAllPicks(false)}
         width={760}
       >
         <TableScroll maxHeight={440}>
           <DataTable
             stickyHeader
-            rows={Object.values(state.draft.picks).sort((a, b) => b.overall - a.overall)}
-            getRowKey={(pick) => String(pick.overall)}
+            rows={[...history].reverse()}
+            getRowKey={(cell) => String(cell.overall)}
             columns={[
-              { key: "pick", header: "Pick", width: "64px", cell: (p) => `#${p.overall}` },
-              { key: "round", header: "Round", width: "72px", cell: (p) => p.round },
+              { key: "pick", header: "Pick", width: "64px", cell: (c) => `#${c.overall}` },
+              { key: "round", header: "Round", width: "72px", cell: (c) => c.round },
               {
                 key: "player",
                 header: "Player",
-                cell: (p) =>
-                  p.selection.kind === "player"
-                    ? (draftState.pool.byId[p.selection.playerId]?.name ?? "Not in active source")
-                    : `${p.selection.label} (unresolved)`,
+                cell: (c) =>
+                  c.playerId !== undefined
+                    ? (draftState.pool.byId[c.playerId]?.name ?? "Not in active source")
+                    : `${c.unresolvedLabel} (unresolved)`,
               },
               {
                 key: "pos",
                 header: "Pos",
                 width: "72px",
-                cell: (p) =>
-                  p.selection.kind === "player"
-                    ? (draftState.pool.byId[p.selection.playerId]?.eligibility.positions.join("/") ??
-                      "—")
+                cell: (c) =>
+                  c.playerId !== undefined
+                    ? (draftState.pool.byId[c.playerId]?.eligibility.positions.join("/") ?? "—")
                     : "—",
               },
-              { key: "team", header: "Drafted By", cell: (p) => nameFor(p.franchiseId) },
+              { key: "team", header: "Team", cell: (c) => nameFor(c.franchiseId) },
               {
                 key: "state",
                 header: "",
                 width: "76px",
-                cell: (p) =>
-                  p.corrected ? (
+                cell: (c) =>
+                  c.kind === "keeper" ? (
+                    <StatusPill tone="medium" size="sm">
+                      Keeper
+                    </StatusPill>
+                  ) : state.draft.picks[c.overall]?.corrected ? (
                     <StatusPill tone="quiet" size="sm">
                       Edited
                     </StatusPill>

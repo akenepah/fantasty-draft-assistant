@@ -18,14 +18,15 @@ import { PrimaryButton, SecondaryButton } from "@/components/ui/Button";
 import { DataTable, TableScroll, type Column } from "@/components/ui/DataTable";
 import { TeamBadge, TeamEmblem } from "@/components/ui/TeamBadge";
 import { Toast, type ToastMessage } from "@/components/ui/Toast";
+import { StatusPill } from "@/components/ui/StatusPill";
 import { Unavailable } from "@/components/ui/Unavailable";
 import { useAppState } from "@/components/AppStateProvider";
 import { CATEGORY_BY_KEY, formatCategoryValue } from "@/lib/domain/categories";
 import { scoredCategories } from "@/lib/domain/scoring";
 import { assignSlots } from "@/lib/domain/roster";
 import { postDraftWatchlist } from "@/lib/domain/recommend";
-import { draftBoardCsv, draftHighlights } from "@/lib/domain/results";
-import type { CategoryKey, DraftPick, Player, StandingRow } from "@/lib/domain/types";
+import { boardCells, draftBoardCsv, draftHighlights, type BoardCell } from "@/lib/domain/results";
+import type { CategoryKey, Player, StandingRow } from "@/lib/domain/types";
 
 type Tab = "overview" | "rosters" | "standings" | "totals" | "board" | "values";
 
@@ -125,10 +126,9 @@ export default function DraftResultsPage() {
     [draftState.rosters, rosterTeam, league.roster],
   );
 
-  const boardPicks = useMemo(
-    () => (boardRound === "all" ? picks : picks.filter((pick) => pick.round === Number(boardRound))),
-    [picks, boardRound],
-  );
+  const cells = boardCells(state.draft, draftState.keeperCellByOverall);
+  const boardPicks =
+    boardRound === "all" ? cells : cells.filter((cell) => cell.round === Number(boardRound));
 
   const teamOptions = league.franchises.map((franchise) => ({
     value: franchise.id,
@@ -136,7 +136,12 @@ export default function DraftResultsPage() {
   }));
 
   const exportCsv = () => {
-    const csv = draftBoardCsv(state.draft, draftState.pool, league.franchises);
+    const csv = draftBoardCsv(
+      state.draft,
+      draftState.pool,
+      league.franchises,
+      draftState.keeperCellByOverall,
+    );
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -185,29 +190,41 @@ export default function DraftResultsPage() {
     })),
   ] as Column<{ slot: string; player: Player }>[];
 
-  const boardColumns: Column<DraftPick>[] = [
-    { key: "pick", header: "Pick", width: "52px", cell: (pick) => pick.overall },
+  const boardColumns: Column<BoardCell>[] = [
+    { key: "pick", header: "Pick", width: "52px", cell: (cell) => cell.overall },
     {
       key: "player",
       header: "Player",
-      cell: (pick) =>
-        pick.selection.kind === "player"
-          ? (draftState.pool.byId[pick.selection.playerId]?.name ?? "Not in active source")
-          : `${pick.selection.label} (unresolved)`,
+      cell: (cell) =>
+        cell.playerId !== undefined
+          ? (draftState.pool.byId[cell.playerId]?.name ?? "Not in active source")
+          : `${cell.unresolvedLabel} (unresolved)`,
     },
     {
       key: "team",
       header: "Team",
       width: "56px",
-      cell: (pick) =>
-        pick.selection.kind === "player"
-          ? (draftState.pool.byId[pick.selection.playerId]?.team ?? "—")
-          : "—",
+      cell: (cell) =>
+        cell.playerId !== undefined ? (draftState.pool.byId[cell.playerId]?.team ?? "—") : "—",
     },
-    { key: "drafted", header: "Drafted By", cell: (pick) => nameFor(pick.franchiseId) },
+    { key: "owner", header: "Team", cell: (cell) => nameFor(cell.franchiseId) },
+    {
+      key: "how",
+      header: "How",
+      width: "78px",
+      // A locked keeper cell reads differently from a live selection.
+      cell: (cell) =>
+        cell.kind === "keeper" ? (
+          <StatusPill size="sm" tone="medium">
+            Keeper
+          </StatusPill>
+        ) : (
+          <span className="text-fh-ink-2">Drafted</span>
+        ),
+    },
   ];
 
-  if (picks.length === 0) {
+  if (cells.length === 0) {
     return (
       <>
         <PageHeader
@@ -241,7 +258,7 @@ export default function DraftResultsPage() {
               </p>
               <p className="text-fh-meta text-fh-ink-2">
                 {league.rounds} rounds · {league.teamCount} teams ·{" "}
-                {draftState.pointer.recordedPicks}/{draftState.pointer.totalPicks} picks
+                {draftState.pointer.completedPicks}/{draftState.pointer.totalPicks} picks
               </p>
             </div>
             {!complete && (
@@ -291,9 +308,9 @@ export default function DraftResultsPage() {
             />
             <SummaryTile
               icon={<IconUser size={20} stroke={1.7} aria-hidden />}
-              value={String(draftState.pointer.recordedPicks)}
+              value={String(draftState.pointer.completedPicks)}
               label="Players Drafted"
-              detail={`${draftState.pointer.totalPicks - draftState.pointer.recordedPicks} remaining`}
+              detail={`${draftState.pointer.totalPicks - draftState.pointer.completedPicks} remaining`}
               subdetail={
                 draftState.unresolvedTotal > 0
                   ? `${draftState.unresolvedTotal} unresolved`
@@ -449,7 +466,7 @@ export default function DraftResultsPage() {
 
             <PanelCard
               title="Draft Board"
-              description="Every recorded pick, in order."
+              description="Every settled cell, in schedule order."
               action={
                 <div className="w-[148px]">
                   <SmallSelect

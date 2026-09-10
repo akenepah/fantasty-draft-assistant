@@ -52,7 +52,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
 
           <span className="hidden text-fh-meta text-fh-ink-2 xl:block">
-            {derived.draft.pointer.recordedPicks}/{derived.draft.pointer.totalPicks} picks
+            {derived.draft.pointer.completedPicks}/{derived.draft.pointer.totalPicks} picks
           </span>
 
           <button

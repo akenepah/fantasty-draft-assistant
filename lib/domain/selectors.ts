@@ -6,13 +6,19 @@ import {
   draftPhase,
   franchiseTurn,
   isRosterFinishing,
+  keeperCells,
   type DraftPhase,
   type DraftPointer,
   type FranchiseTurn,
 } from "./schedule";
 import { computeStandings } from "./standings";
 import { draftedPlayerIds, type AppState } from "./state";
-import type { Player, ProjectedStandings, ProjectedTeamTotals } from "./types";
+import type {
+  KeeperAssignment,
+  Player,
+  ProjectedStandings,
+  ProjectedTeamTotals,
+} from "./types";
 
 /**
  * Everything the screens read is derived here, from the one state object.
@@ -31,6 +37,10 @@ export type DraftState = {
   draftedIds: Set<string>;
   /** Players owned before the draft; empty outside a keeper league. */
   keeperIds: Set<string>;
+  /** Schedule cells locked by a keeper: overall number → kept player id. */
+  keeperCellByOverall: Map<number, string>;
+  /** Keepers with no cell left to sit in — more keepers than rounds. */
+  unplacedKeepers: KeeperAssignment[];
   /** Resolved players by franchise, in the order they were drafted. */
   rosters: Record<string, Player[]>;
   /** Picks recorded against a placeholder, by franchise. */
@@ -125,8 +135,15 @@ function deriveDraft(state: AppState): DraftState {
     else unresolvedByFranchise[pick.franchiseId] += 1;
   }
 
-  const pointer = derivePointer(state.draft);
-  const managedTurn = franchiseTurn(state.draft, state.league.managedFranchiseId);
+  // Keepers hold locked, already-complete cells in the frozen schedule, so
+  // the pointer and every "picks until your turn" must step over them.
+  const cells = keeperCells(state.draft.schedule, keepers);
+  const pointer = derivePointer(state.draft, cells.byOverall);
+  const managedTurn = franchiseTurn(
+    state.draft,
+    state.league.managedFranchiseId,
+    cells.byOverall,
+  );
   const managedRoster = rosters[state.league.managedFranchiseId] ?? [];
 
   return {
@@ -134,6 +151,8 @@ function deriveDraft(state: AppState): DraftState {
     available,
     draftedIds,
     keeperIds,
+    keeperCellByOverall: cells.byOverall,
+    unplacedKeepers: cells.unplacedKeepers,
     rosters,
     unresolvedByFranchise,
     unresolvedTotal: Object.values(unresolvedByFranchise).reduce((sum, n) => sum + n, 0),

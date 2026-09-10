@@ -1,4 +1,4 @@
-import { buildSchedule } from "./schedule";
+import { buildSchedule, keeperCells } from "./schedule";
 import { sampleDatasets } from "./sample";
 import type {
   CategoryKey,
@@ -178,6 +178,46 @@ export type Action =
  * Reducer
  * ---------------------------------------------------------------------- */
 
+/**
+ * Apply a keeper change and clear any recorded pick it collides with.
+ *
+ * Keepers are meant to be set before pick one, but nothing stops a user from
+ * adding one mid-draft. When that claims a cell a pick already sits in, the
+ * pick loses — the same rule `withSchedule` uses for picks that no longer fit
+ * the board, and far better than leaving two things in one cell.
+ */
+function withKeepers(state: AppState, league: League): AppState {
+  if (league.leagueType !== "keeper") return { ...state, league };
+
+  const { byOverall } = keeperCells(state.draft.schedule, league.keepers);
+  const picks: Record<number, DraftPick> = {};
+  for (const [key, pick] of Object.entries(state.draft.picks)) {
+    const overall = Number(key);
+    if (byOverall.has(overall)) continue;
+    picks[overall] = pick;
+  }
+
+  if (Object.keys(picks).length === Object.keys(state.draft.picks).length) {
+    return { ...state, league };
+  }
+
+  return {
+    ...state,
+    league,
+    draft: {
+      ...state.draft,
+      picks,
+      entryOrder: state.draft.entryOrder.filter((overall) => picks[overall] !== undefined),
+    },
+  };
+}
+
+/** True when a keeper already holds this cell, so nothing may be written to it. */
+function lockedByKeeper(state: AppState, overall: number): boolean {
+  if (state.league.leagueType !== "keeper") return false;
+  return keeperCells(state.draft.schedule, state.league.keepers).byOverall.has(overall);
+}
+
 /** Rebuild the frozen schedule and drop anything it can no longer hold. */
 function withSchedule(state: AppState, league: League): AppState {
   const schedule = buildSchedule(league.draftOrder, league.rounds);
@@ -188,11 +228,17 @@ function withSchedule(state: AppState, league: League): AppState {
   const keepers = league.keepers.filter((keeper) => valid.has(keeper.franchiseId));
   if (keepers.length !== league.keepers.length) league = { ...league, keepers };
 
+  // Changing rounds or order moves the keeper cells, so re-apply the same
+  // rule: a pick sharing a cell with a keeper loses it.
+  const keeperOveralls =
+    league.leagueType === "keeper" ? keeperCells(schedule, keepers).byOverall : new Map();
+
   const picks: Record<number, DraftPick> = {};
   for (const [key, pick] of Object.entries(state.draft.picks)) {
     const overall = Number(key);
     if (overall > schedule.picks.length) continue;
     if (!valid.has(pick.franchiseId)) continue;
+    if (keeperOveralls.has(overall)) continue;
     picks[overall] = pick;
   }
 
@@ -306,7 +352,7 @@ export function reducer(state: AppState, action: Action): AppState {
       // Switching back to redraft keeps the assignments rather than deleting
       // them: selectors ignore keepers outside a keeper league, so flipping
       // the type twice by accident does not destroy the work of entering them.
-      return { ...state, league: { ...state.league, leagueType: action.leagueType } };
+      return withKeepers(state, { ...state.league, leagueType: action.leagueType });
 
     case "league/assignKeeper": {
       if (!state.league.franchises.some((f) => f.id === action.franchiseId)) return state;
@@ -315,10 +361,11 @@ export function reducer(state: AppState, action: Action): AppState {
         (keeper) => keeper.playerId !== action.playerId,
       );
       keepers.push({ playerId: action.playerId, franchiseId: action.franchiseId });
-      return { ...state, league: { ...state.league, keepers } };
+      return withKeepers(state, { ...state.league, keepers });
     }
 
     case "league/removeKeeper":
+      // Freeing a cell can never collide with a pick, so no reconciliation.
       return {
         ...state,
         league: {
@@ -387,6 +434,9 @@ export function reducer(state: AppState, action: Action): AppState {
     case "draft/record": {
       const scheduled = state.draft.schedule.picks[action.overall - 1];
       if (!scheduled || state.draft.picks[action.overall]) return state;
+      // A keeper cell is already complete. The pointer never lands on one, but
+      // a correction or an out-of-order entry could still aim at it.
+      if (lockedByKeeper(state, action.overall)) return state;
 
       const pick: DraftPick = {
         overall: action.overall,

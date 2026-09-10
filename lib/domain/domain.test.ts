@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assignSlots, openStartingNeeds, rosterCapacity, rosterFit } from "./roster";
 import { buildSchedule, derivePointer, franchiseTurn, orderForRound } from "./schedule";
+import { boardCells } from "./results";
 import { categoryTotal, playerFantasyPoints, teamTotals } from "./scoring";
 import { computeStandings } from "./standings";
 import { buildPlayerPool, matchKeyFor } from "./projections";
@@ -818,5 +819,172 @@ describe("keeper leagues", () => {
     expect(revived!.league.keepers).toEqual([]);
     // The draft it was carrying is still there.
     expect(revived!.draft.schedule.picks.length).toBeGreaterThan(0);
+  });
+});
+
+describe("keeper cells in the pick schedule", () => {
+  /** Keeper league with `counts[franchiseId]` keepers assigned to each. */
+  function leagueWith(counts: Record<string, number>) {
+    let state = reducer(createInitialState(), {
+      type: "league/setLeagueType",
+      leagueType: "keeper",
+    });
+    let next = 0;
+    const pool = derive(state).draft.pool.players;
+    for (const [franchiseId, count] of Object.entries(counts)) {
+      for (let i = 0; i < count; i += 1) {
+        state = reducer(state, {
+          type: "league/assignKeeper",
+          playerId: pool[next++].id,
+          franchiseId,
+        });
+      }
+    }
+    return state;
+  }
+
+  it("fills each franchise's own cells from round one upward", () => {
+    // f1 picks 1st in round 1, so snakes to 24th overall in round 2 and 25th
+    // in round 3. Its three keepers take exactly those cells.
+    const state = leagueWith({ f1: 3 });
+    const cells = derive(state).draft.keeperCellByOverall;
+    expect([...cells.keys()].sort((a, b) => a - b)).toEqual([1, 24, 25]);
+  });
+
+  it("gives each franchise its own rounds, not a shared block", () => {
+    const state = leagueWith({ f1: 2, f5: 1 });
+    const cells = derive(state).draft.keeperCellByOverall;
+    // f1: 1st and 24th. f5: 5th.
+    expect([...cells.keys()].sort((a, b) => a - b)).toEqual([1, 5, 24]);
+  });
+
+  it("steps the pointer over keeper cells without renumbering the board", () => {
+    const state = leagueWith({ f1: 1, f2: 1 });
+    const draft = derive(state).draft;
+
+    // Cells 1 and 2 are held, so the draft opens on pick 3 — which is still
+    // numbered 3, still round 1, and still belongs to f3.
+    expect(draft.pointer.currentOverall).toBe(3);
+    expect(draft.pointer.round).toBe(1);
+    expect(draft.pointer.franchiseId).toBe("f3");
+    expect(draft.pointer.recordedPicks).toBe(0);
+    expect(draft.pointer.keeperPicks).toBe(2);
+    expect(draft.pointer.completedPicks).toBe(2);
+    // The schedule is untouched: same length, same numbering.
+    expect(draft.pointer.totalPicks).toBe(240);
+    expect(state.draft.schedule.picks[2].overall).toBe(3);
+  });
+
+  it("keeps snake direction tied to the real round number", () => {
+    const state = leagueWith({ f1: 1 });
+    // Round 2 still reverses regardless of the keeper sitting in round 1.
+    expect(orderForRound(2, state.league.draftOrder)[0]).toBe("f12");
+    const round2 = state.draft.schedule.picks.filter((p) => p.round === 2);
+    expect(round2[0].franchiseId).toBe("f12");
+    expect(round2[0].overall).toBe(13);
+  });
+
+  it("does not count a keeper cell as a pick the managed team still makes", () => {
+    const managed = createInitialState().league.managedFranchiseId; // f3
+    const state = leagueWith({ [managed]: 2 });
+    const turn = derive(state).draft.managedTurn;
+
+    // 20 rounds, two spent on keepers, so 18 live selections remain and the
+    // next one is in round 3.
+    expect(turn.remainingPicks).toHaveLength(18);
+    expect(turn.nextOverall).toBe(27);
+  });
+
+  it("counts only live cells when saying how far away your turn is", () => {
+    // f1 and f2 both keep one, so their round-one cells are gone. From the
+    // opening pointer (#3), f4's turn is one live cell away, not three.
+    const state = leagueWith({ f1: 1, f2: 1 });
+    const turn = franchiseTurn(state.draft, "f4", derive(state).draft.keeperCellByOverall);
+    expect(turn.nextOverall).toBe(4);
+    expect(turn.picksUntil).toBe(1);
+  });
+
+  it("refuses to record a pick into a cell a keeper holds", () => {
+    const state = leagueWith({ f1: 1 });
+    const attempted = reducer(state, {
+      type: "draft/record",
+      overall: 1,
+      franchiseId: "f1",
+      selection: { kind: "player", playerId: derive(state).draft.available[0].id },
+    });
+    expect(attempted.draft.picks[1]).toBeUndefined();
+    expect(attempted).toBe(state);
+  });
+
+  it("clears a recorded pick that a later keeper assignment claims", () => {
+    let state = reducer(createInitialState(), {
+      type: "league/setLeagueType",
+      leagueType: "keeper",
+    });
+    const first = derive(state).draft.available[0];
+    state = reducer(state, {
+      type: "draft/record",
+      overall: 1,
+      franchiseId: "f1",
+      selection: { kind: "player", playerId: first.id },
+    });
+    expect(state.draft.picks[1]).toBeDefined();
+
+    // Assigning f1 a keeper claims cell 1; two things cannot share a cell.
+    const withKeeper = reducer(state, {
+      type: "league/assignKeeper",
+      playerId: derive(state).draft.available[0].id,
+      franchiseId: "f1",
+    });
+    expect(withKeeper.draft.picks[1]).toBeUndefined();
+    expect(withKeeper.draft.entryOrder).not.toContain(1);
+  });
+
+  it("reports keepers with no round left to sit in", () => {
+    let state = reducer(createInitialState(), {
+      type: "league/setLeagueType",
+      leagueType: "keeper",
+    });
+    state = reducer(state, { type: "league/setRounds", rounds: 2 });
+    const pool = derive(state).draft.pool.players;
+    for (let i = 0; i < 3; i += 1) {
+      state = reducer(state, {
+        type: "league/assignKeeper",
+        playerId: pool[i].id,
+        franchiseId: "f1",
+      });
+    }
+
+    const draft = derive(state).draft;
+    expect(draft.keeperCellByOverall.size).toBe(2);
+    expect(draft.unplacedKeepers).toHaveLength(1);
+    // The third still owns his roster spot even with no cell to sit in.
+    expect(draft.rosters.f1).toHaveLength(3);
+  });
+
+  it("puts keeper cells on the shared board alongside recorded picks", () => {
+    let state = leagueWith({ f1: 1 });
+    state = reducer(state, {
+      type: "draft/record",
+      overall: 2,
+      franchiseId: "f2",
+      selection: { kind: "player", playerId: derive(state).draft.available[0].id },
+    });
+
+    const cells = boardCells(state.draft, derive(state).draft.keeperCellByOverall);
+    expect(cells.map((cell) => [cell.overall, cell.kind])).toEqual([
+      [1, "keeper"],
+      [2, "pick"],
+    ]);
+  });
+
+  it("ignores keeper cells entirely in a redraft league", () => {
+    const keeper = leagueWith({ f1: 3 });
+    const redraft = reducer(keeper, { type: "league/setLeagueType", leagueType: "redraft" });
+    const draft = derive(redraft).draft;
+
+    expect(draft.keeperCellByOverall.size).toBe(0);
+    expect(draft.pointer.currentOverall).toBe(1);
+    expect(draft.pointer.keeperPicks).toBe(0);
   });
 });

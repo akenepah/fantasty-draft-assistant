@@ -81,6 +81,14 @@ computed from the player's ADP against the managed team's next pick. With only a
 rank the level stays qualitative — *Likely to return* / *Risk increasing* / *Unlikely to
 return* — rather than inventing a number.
 
+**A keeper is a locked cell, not a missing one.** In a keeper league the kept
+players are assigned to franchises by hand under League Setup — a projection file can
+flag a player as kept, but it cannot say *whose* keeper he is, so the flag only ever
+raises a suggestion. Each franchise's keepers then occupy its own cells from round one
+upward, staying in the frozen numbered schedule as already-complete. The pointer steps
+over them; nothing collapses, nothing renumbers, and the snake still turns on the real
+round number.
+
 **The real draft is authoritative.** A name that cannot be matched is recorded as an
 unresolved placeholder so the draft keeps moving, and every pick can later be re-pointed at a
 different player, reassigned to another franchise, resolved, or removed — including picks in
